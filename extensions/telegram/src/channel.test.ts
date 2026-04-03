@@ -8,6 +8,8 @@ import { telegramPlugin } from "./channel.js";
 import * as monitorModule from "./monitor.js";
 import * as probeModule from "./probe.js";
 import { clearTelegramRuntime, setTelegramRuntime } from "./runtime.js";
+import * as sendModule from "./send.js";
+import * as tokenModule from "./token.js";
 
 const probeTelegramMock = vi.hoisted(() => vi.fn());
 const collectTelegramUnmentionedGroupIdsMock = vi.hoisted(() => vi.fn());
@@ -78,16 +80,7 @@ function installTelegramRuntime(telegram?: Record<string, unknown>) {
   } as unknown as PluginRuntime);
 }
 
-function installGatewayRuntime(params?: {
-  probeOk?: boolean;
-  botUsername?: string;
-  runtimeHelpers?: {
-    probeTelegram?: typeof probeModule.probeTelegram;
-    collectTelegramUnmentionedGroupIds?: typeof auditModule.collectTelegramUnmentionedGroupIds;
-    auditTelegramGroupMembership?: typeof auditModule.auditTelegramGroupMembership;
-    monitorTelegramProvider?: typeof monitorModule.monitorTelegramProvider;
-  };
-}) {
+function installGatewayRuntime(params?: { probeOk?: boolean; botUsername?: string }) {
   const monitorTelegramProvider = vi
     .spyOn(monitorModule, "monitorTelegramProvider")
     .mockImplementation(async () => undefined);
@@ -115,15 +108,6 @@ function installGatewayRuntime(params?: {
       groups: [],
       elapsedMs: 0,
     }));
-  installTelegramRuntime({
-    probeTelegram: params?.runtimeHelpers?.probeTelegram ?? probeTelegram,
-    collectTelegramUnmentionedGroupIds:
-      params?.runtimeHelpers?.collectTelegramUnmentionedGroupIds ?? collectUnmentionedGroupIds,
-    auditTelegramGroupMembership:
-      params?.runtimeHelpers?.auditTelegramGroupMembership ?? auditGroupMembership,
-    monitorTelegramProvider:
-      params?.runtimeHelpers?.monitorTelegramProvider ?? monitorTelegramProvider,
-  });
   return {
     monitorTelegramProvider,
     probeTelegram,
@@ -152,17 +136,18 @@ function createOpsProxyAccount() {
   };
 }
 
-function installSendMessageRuntime(
+function installSendMessageSpy(
   sendMessageTelegram: ReturnType<typeof vi.fn>,
-): ReturnType<typeof vi.fn> {
-  installTelegramRuntime({
-    sendMessageTelegram,
-  });
+): typeof sendMessageTelegram {
+  vi.spyOn(sendModule, "sendMessageTelegram").mockImplementation(
+    sendMessageTelegram as typeof sendModule.sendMessageTelegram,
+  );
   return sendMessageTelegram;
 }
 
 afterEach(() => {
   clearTelegramRuntime();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
@@ -199,6 +184,135 @@ describe("telegramPlugin groups", () => {
         groupId: "-1001:topic:77",
       }),
     ).toEqual({ allow: ["message.send"] });
+  });
+});
+
+describe("telegramPlugin messaging", () => {
+  it("owns topic session parsing and parent fallback candidates", () => {
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001:topic:77",
+      }),
+    ).toEqual({
+      id: "-1001",
+      threadId: "77",
+      baseConversationId: "-1001",
+      parentConversationCandidates: ["-1001"],
+    });
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001:Topic:77",
+      }),
+    ).toEqual({
+      id: "-1001",
+      threadId: "77",
+      baseConversationId: "-1001",
+      parentConversationCandidates: ["-1001"],
+    });
+    expect(
+      telegramPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: "-1001",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("telegramPlugin threading", () => {
+  it("keeps topic thread state in plugin-owned tool context", () => {
+    expect(
+      telegramPlugin.threading?.buildToolContext?.({
+        cfg: {} as OpenClawConfig,
+        accountId: "default",
+        context: {
+          To: "telegram:-1001:topic:77",
+          MessageThreadId: 77,
+          CurrentMessageId: "msg-1",
+        },
+        hasRepliedRef: { value: false },
+      }),
+    ).toMatchObject({
+      currentChannelId: "telegram:-1001:topic:77",
+      currentThreadTs: "77",
+    });
+  });
+
+  it("parses topic thread state from target grammar when MessageThreadId is absent", () => {
+    expect(
+      telegramPlugin.threading?.buildToolContext?.({
+        cfg: {} as OpenClawConfig,
+        accountId: "default",
+        context: {
+          To: "telegram:-1001:topic:77",
+          CurrentMessageId: "msg-1",
+        },
+      }),
+    ).toMatchObject({
+      currentChannelId: "telegram:-1001:topic:77",
+      currentThreadTs: "77",
+    });
+  });
+
+  it("keeps current DM topic threadId even when replyToId is present", () => {
+    const resolved = telegramPlugin.threading?.resolveAutoThreadId?.({
+      cfg: createCfg(),
+      to: "telegram:1234",
+      replyToId: "4103",
+      toolContext: {
+        currentChannelId: "telegram:1234",
+        currentThreadTs: "533274",
+      },
+    });
+
+    expect(resolved).toBe("533274");
+  });
+
+  it("does not override an explicit target topic when replyToId is present", () => {
+    const resolved = telegramPlugin.threading?.resolveAutoThreadId?.({
+      cfg: createCfg(),
+      to: "telegram:-1001:topic:99",
+      replyToId: "4103",
+      toolContext: {
+        currentChannelId: "telegram:-1001:topic:77",
+        currentThreadTs: "77",
+      },
+    });
+
+    expect(resolved).toBeUndefined();
+  });
+});
+
+describe("telegramPlugin bindings", () => {
+  it("preserves topic and direct command conversation routing", () => {
+    expect(
+      telegramPlugin.bindings?.resolveCommandConversation?.({
+        accountId: "default",
+        threadId: "77",
+        originatingTo: "-1001",
+      }),
+    ).toEqual({
+      conversationId: "-1001:topic:77",
+      parentConversationId: "-1001",
+    });
+
+    expect(
+      telegramPlugin.bindings?.resolveCommandConversation?.({
+        accountId: "default",
+        originatingTo: "12345",
+      }),
+    ).toEqual({
+      conversationId: "12345",
+      parentConversationId: "12345",
+    });
+
+    expect(
+      telegramPlugin.bindings?.resolveCommandConversation?.({
+        accountId: "default",
+        originatingTo: "-1001",
+      }),
+    ).toBeNull();
   });
 });
 
@@ -307,7 +421,7 @@ describe("telegramPlugin duplicate token guard", () => {
     }
   });
 
-  it("prefers runtime Telegram helpers over imported module mocks when runtime is set", async () => {
+  it("prefers runtime Telegram probe helpers when runtime state is set", async () => {
     probeTelegramMock.mockReset();
     const runtimeProbeTelegram = vi.fn(async () => ({
       ok: true,
@@ -420,8 +534,8 @@ describe("telegramPlugin duplicate token guard", () => {
   });
 
   it("forwards mediaLocalRoots to sendMessageTelegram for outbound media sends", async () => {
-    const sendMessageTelegram = installSendMessageRuntime(
-      vi.fn(async () => ({ messageId: "tg-1" })),
+    const sendMessageTelegram = installSendMessageSpy(
+      vi.fn(async () => ({ messageId: "tg-1", chatId: "12345" })),
     );
 
     const result = await telegramPlugin.outbound!.sendMedia!({
@@ -445,8 +559,8 @@ describe("telegramPlugin duplicate token guard", () => {
   });
 
   it("preserves buttons for outbound text payload sends", async () => {
-    const sendMessageTelegram = installSendMessageRuntime(
-      vi.fn(async () => ({ messageId: "tg-2" })),
+    const sendMessageTelegram = installSendMessageSpy(
+      vi.fn(async () => ({ messageId: "tg-2", chatId: "12345" })),
     );
 
     const result = await telegramPlugin.outbound!.sendPayload!({
@@ -475,13 +589,15 @@ describe("telegramPlugin duplicate token guard", () => {
   });
 
   it("preserves accountId for pairing approval sends", async () => {
-    const sendMessageTelegram = vi.fn(async () => ({ messageId: "tg-pair" }));
+    const sendMessageTelegram = vi.fn(async () => ({ messageId: "tg-pair", chatId: "12345" }));
     const resolveTelegramToken = vi.fn(() => ({ token: "token-ops", source: "config" }));
     const cfg = createCfg();
-    installTelegramRuntime({
-      sendMessageTelegram,
-      resolveTelegramToken,
-    });
+    vi.spyOn(sendModule, "sendMessageTelegram").mockImplementation(
+      sendMessageTelegram as typeof sendModule.sendMessageTelegram,
+    );
+    vi.spyOn(tokenModule, "resolveTelegramToken").mockImplementation(
+      resolveTelegramToken as typeof tokenModule.resolveTelegramToken,
+    );
 
     await telegramPlugin.pairing?.notifyApproval?.({
       cfg,
@@ -503,7 +619,7 @@ describe("telegramPlugin duplicate token guard", () => {
   });
 
   it("sends outbound payload media lists and keeps buttons on the first message only", async () => {
-    const sendMessageTelegram = installSendMessageRuntime(
+    const sendMessageTelegram = installSendMessageSpy(
       vi
         .fn()
         .mockResolvedValueOnce({ messageId: "tg-3", chatId: "12345" })
@@ -690,8 +806,8 @@ describe("telegramPlugin duplicate token guard", () => {
 
 describe("telegramPlugin outbound sendPayload forceDocument", () => {
   it("forwards forceDocument to the underlying send call when channelData is present", async () => {
-    const sendMessageTelegram = installSendMessageRuntime(
-      vi.fn(async () => ({ messageId: "tg-fd" })),
+    const sendMessageTelegram = installSendMessageSpy(
+      vi.fn(async () => ({ messageId: "tg-fd", chatId: "12345" })),
     );
 
     await telegramPlugin.outbound!.sendPayload!({

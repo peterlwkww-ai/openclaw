@@ -1,4 +1,5 @@
 import { resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { parseExplicitTargetForChannel } from "../channels/plugins/target-parsing.js";
 import { loadConfig } from "../config/config.js";
 import {
   loadSessionStore,
@@ -7,6 +8,7 @@ import {
   resolveStorePath,
 } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
+import { resolveExternalBestEffortDeliveryTarget } from "../infra/outbound/best-effort-delivery.js";
 import { createBoundDeliveryRouter } from "../infra/outbound/bound-delivery-router.js";
 import { resolveConversationIdFromTargets } from "../infra/outbound/conversation-id.js";
 import type { ConversationRef } from "../infra/outbound/session-binding-service.js";
@@ -21,7 +23,12 @@ import {
   normalizeDeliveryContext,
   resolveConversationDeliveryTarget,
 } from "../utils/delivery-context.js";
-import { INTERNAL_MESSAGE_CHANNEL, isInternalMessageChannel } from "../utils/message-channel.js";
+import {
+  INTERNAL_MESSAGE_CHANNEL,
+  isGatewayMessageChannel,
+  isInternalMessageChannel,
+  normalizeMessageChannel,
+} from "../utils/message-channel.js";
 import { buildAnnounceIdempotencyKey, resolveQueueAnnounceId } from "./announce-idempotency.js";
 import type { AgentInternalEvent } from "./internal-events.js";
 import { isEmbeddedPiRunActive, queueEmbeddedPiMessage } from "./pi-embedded.js";
@@ -83,6 +90,52 @@ function summarizeDeliveryError(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return "error";
+  }
+}
+
+function parseTelegramAnnounceTarget(to: string): {
+  chatId: string;
+  chatType: "direct" | "group" | "unknown";
+} {
+  const parsed = parseExplicitTargetForChannel("telegram", to);
+  const chatId = parsed?.to?.trim() ?? to.trim();
+  const chatType =
+    parsed?.chatType === "direct" || parsed?.chatType === "group" ? parsed.chatType : "unknown";
+  return { chatId, chatType };
+}
+
+function shouldStripThreadFromAnnounceEntry(
+  normalizedRequester?: DeliveryContext,
+  normalizedEntry?: DeliveryContext,
+): boolean {
+  if (
+    !normalizedRequester?.to ||
+    normalizedRequester.threadId != null ||
+    normalizedEntry?.threadId == null
+  ) {
+    return false;
+  }
+  const requesterChannel = normalizedRequester.channel?.trim().toLowerCase();
+  if (requesterChannel && requesterChannel !== "telegram") {
+    return true;
+  }
+  if (!requesterChannel && !normalizedRequester.to.startsWith("telegram:")) {
+    return true;
+  }
+  try {
+    const requesterTarget = parseTelegramAnnounceTarget(normalizedRequester.to);
+    if (requesterTarget.chatType !== "group") {
+      return true;
+    }
+    const entryTarget = normalizedEntry.to
+      ? parseTelegramAnnounceTarget(normalizedEntry.to)
+      : undefined;
+    if (entryTarget && entryTarget.chatId !== requesterTarget.chatId) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
@@ -190,9 +243,7 @@ export function resolveAnnounceOrigin(
     );
   }
   const entryForMerge =
-    normalizedRequester?.to &&
-    normalizedRequester.threadId == null &&
-    normalizedEntry?.threadId != null
+    normalizedEntry && shouldStripThreadFromAnnounceEntry(normalizedRequester, normalizedEntry)
       ? (() => {
           const { threadId: _ignore, ...rest } = normalizedEntry;
           return rest;
@@ -448,6 +499,7 @@ async function sendSubagentAnnounceDirectly(params: {
   directIdempotencyKey: string;
   completionDirectOrigin?: DeliveryContext;
   directOrigin?: DeliveryContext;
+  requesterSessionOrigin?: DeliveryContext;
   sourceSessionKey?: string;
   sourceChannel?: string;
   sourceTool?: string;
@@ -469,25 +521,29 @@ async function sendSubagentAnnounceDirectly(params: {
   try {
     const completionDirectOrigin = normalizeDeliveryContext(params.completionDirectOrigin);
     const directOrigin = normalizeDeliveryContext(params.directOrigin);
+    const requesterSessionOrigin = normalizeDeliveryContext(params.requesterSessionOrigin);
     const effectiveDirectOrigin =
       params.expectsCompletionMessage && completionDirectOrigin
         ? completionDirectOrigin
         : directOrigin;
-    const directChannel =
-      typeof effectiveDirectOrigin?.channel === "string"
-        ? effectiveDirectOrigin.channel.trim()
-        : "";
-    const directTo =
-      typeof effectiveDirectOrigin?.to === "string" ? effectiveDirectOrigin.to.trim() : "";
-    const shouldDeliverExternally =
-      !params.requesterIsSubagent &&
-      Boolean(directChannel) &&
-      Boolean(directTo) &&
-      !isInternalMessageChannel(directChannel);
-
-    const threadId =
-      effectiveDirectOrigin?.threadId != null && effectiveDirectOrigin.threadId !== ""
-        ? String(effectiveDirectOrigin.threadId)
+    const sessionOnlyOrigin = effectiveDirectOrigin?.channel
+      ? effectiveDirectOrigin
+      : requesterSessionOrigin;
+    const deliveryTarget = !params.requesterIsSubagent
+      ? resolveExternalBestEffortDeliveryTarget({
+          channel: effectiveDirectOrigin?.channel,
+          to: effectiveDirectOrigin?.to,
+          accountId: effectiveDirectOrigin?.accountId,
+          threadId: effectiveDirectOrigin?.threadId,
+        })
+      : { deliver: false };
+    const normalizedSessionOnlyOriginChannel = !params.requesterIsSubagent
+      ? normalizeMessageChannel(sessionOnlyOrigin?.channel)
+      : undefined;
+    const sessionOnlyOriginChannel =
+      normalizedSessionOnlyOriginChannel &&
+      isGatewayMessageChannel(normalizedSessionOnlyOriginChannel)
+        ? normalizedSessionOnlyOriginChannel
         : undefined;
     if (params.signal?.aborted) {
       return {
@@ -506,13 +562,25 @@ async function sendSubagentAnnounceDirectly(params: {
           params: {
             sessionKey: canonicalRequesterSessionKey,
             message: params.triggerMessage,
-            deliver: shouldDeliverExternally,
+            deliver: deliveryTarget.deliver,
             bestEffortDeliver: params.bestEffortDeliver,
             internalEvents: params.internalEvents,
-            channel: !params.requesterIsSubagent ? directChannel || undefined : undefined,
-            accountId: !params.requesterIsSubagent ? effectiveDirectOrigin?.accountId : undefined,
-            to: !params.requesterIsSubagent ? directTo || undefined : undefined,
-            threadId: !params.requesterIsSubagent ? threadId : undefined,
+            channel: deliveryTarget.deliver ? deliveryTarget.channel : sessionOnlyOriginChannel,
+            accountId: deliveryTarget.deliver
+              ? deliveryTarget.accountId
+              : sessionOnlyOriginChannel
+                ? sessionOnlyOrigin?.accountId
+                : undefined,
+            to: deliveryTarget.deliver
+              ? deliveryTarget.to
+              : sessionOnlyOriginChannel
+                ? sessionOnlyOrigin?.to
+                : undefined,
+            threadId: deliveryTarget.deliver
+              ? deliveryTarget.threadId
+              : sessionOnlyOriginChannel
+                ? sessionOnlyOrigin?.threadId
+                : undefined,
             inputProvenance: {
               kind: "inter_session",
               sourceSessionKey: params.sourceSessionKey,
@@ -546,6 +614,7 @@ export async function deliverSubagentAnnouncement(params: {
   steerMessage: string;
   internalEvents?: AgentInternalEvent[];
   summaryLine?: string;
+  requesterSessionOrigin?: DeliveryContext;
   requesterOrigin?: DeliveryContext;
   completionDirectOrigin?: DeliveryContext;
   directOrigin?: DeliveryContext;
@@ -584,6 +653,7 @@ export async function deliverSubagentAnnouncement(params: {
         directIdempotencyKey: params.directIdempotencyKey,
         completionDirectOrigin: params.completionDirectOrigin,
         directOrigin: params.directOrigin,
+        requesterSessionOrigin: params.requesterSessionOrigin,
         sourceSessionKey: params.sourceSessionKey,
         sourceChannel: params.sourceChannel,
         sourceTool: params.sourceTool,

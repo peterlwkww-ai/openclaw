@@ -106,7 +106,7 @@ Current bundled examples:
   policy, binary-thinking/live-model policy, and usage auth + quota fetching
 - `mistral`, `opencode`, and `opencode-go`: plugin-owned capability metadata
 - `byteplus`, `cloudflare-ai-gateway`, `huggingface`, `kimi-coding`,
-  `modelstudio`, `nvidia`, `qianfan`, `synthetic`, `together`, `venice`,
+  `modelstudio`, `nvidia`, `qianfan`, `stepfun`, `synthetic`, `together`, `venice`,
   `vercel-ai-gateway`, and `volcengine`: plugin-owned catalogs only
 - `minimax` and `xiaomi`: plugin-owned catalogs plus usage auth/snapshot logic
 
@@ -164,7 +164,7 @@ OpenClaw ships with the pi‑ai catalog. These providers require **no**
 - Optional rotation: `ANTHROPIC_API_KEYS`, `ANTHROPIC_API_KEY_1`, `ANTHROPIC_API_KEY_2`, plus `OPENCLAW_LIVE_ANTHROPIC_KEY` (single override)
 - Example model: `anthropic/claude-opus-4-6`
 - CLI: `openclaw onboard --auth-choice token` (paste setup-token) or `openclaw models auth paste-token --provider anthropic`
-- Direct API-key models support the shared `/fast` toggle and `params.fastMode`; OpenClaw maps that to Anthropic `service_tier` (`auto` vs `standard_only`)
+- Direct public Anthropic requests support the shared `/fast` toggle and `params.fastMode`, including API-key and OAuth-authenticated traffic sent to `api.anthropic.com`; OpenClaw maps that to Anthropic `service_tier` (`auto` vs `standard_only`)
 - Policy note: setup-token support is technical compatibility; Anthropic has blocked some subscription usage outside Claude Code in the past. Verify current Anthropic terms and decide based on your risk tolerance.
 - Recommendation: Anthropic API key auth is the safer, recommended path over subscription setup-token auth.
 
@@ -265,6 +265,8 @@ See [/providers/kilocode](/providers/kilocode) for setup details.
 - Qianfan: `qianfan` (`QIANFAN_API_KEY`)
 - Model Studio: `modelstudio` (`MODELSTUDIO_API_KEY`)
 - NVIDIA: `nvidia` (`NVIDIA_API_KEY`)
+- StepFun: `stepfun` / `stepfun-plan` (`STEPFUN_API_KEY`)
+- Example models: `stepfun/step-3.5-flash`, `stepfun-plan/step-3.5-flash-2603`
 - Together: `together` (`TOGETHER_API_KEY`)
 - Venice: `venice` (`VENICE_API_KEY`)
 - Xiaomi: `xiaomi` (`XIAOMI_API_KEY`)
@@ -590,3 +592,10 @@ openclaw models list
 ```
 
 See also: [/gateway/configuration](/gateway/configuration) for full configuration examples.
+
+## Related
+
+- [Models](/concepts/models) — model configuration and aliases
+- [Model Failover](/concepts/model-failover) — fallback chains and retry behavior
+- [Configuration Reference](/gateway/configuration-reference#agent-defaults) — model config keys
+- [Providers](/providers) — per-provider setup guides

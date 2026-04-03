@@ -8,18 +8,18 @@ import {
   type SessionBindingCapabilities,
   type SessionBindingRecord,
 } from "../../../infra/outbound/session-binding-service.js";
-import { createDiscordThreadBindingManager } from "../../../plugin-sdk/discord.js";
+import { createThreadBindingManager as createDiscordThreadBindingManager } from "../../../plugin-sdk/discord-thread-bindings.js";
 import { createFeishuThreadBindingManager } from "../../../plugin-sdk/feishu.js";
 import {
   listLineAccountIds,
   resolveDefaultLineAccountId,
   resolveLineAccount,
 } from "../../../plugin-sdk/line.js";
+import { setMatrixRuntime } from "../../../plugin-sdk/matrix-runtime-surface.js";
 import {
   createMatrixThreadBindingManager,
   resetMatrixThreadBindingsForTests,
-  setMatrixRuntime,
-} from "../../../plugin-sdk/matrix.js";
+} from "../../../plugin-sdk/matrix-surface.js";
 import { loadBundledPluginTestApiSync } from "../../../test-utils/bundled-plugin-public-surface.js";
 import {
   listBundledChannelPlugins,
@@ -176,7 +176,6 @@ function expectClearedSessionBinding(params: {
   ).toBeNull();
 }
 
-const telegramDescribeMessageToolMock = vi.fn();
 const discordDescribeMessageToolMock = vi.fn();
 const sendMessageMatrixMock = vi.hoisted(() =>
   vi.fn(async (to: string, _message: string, opts?: { threadId?: string }) => ({
@@ -184,16 +183,6 @@ const sendMessageMatrixMock = vi.hoisted(() =>
     roomId: to.replace(/^room:/, ""),
   })),
 );
-
-setBundledChannelRuntime("telegram", {
-  channel: {
-    telegram: {
-      messageActions: {
-        describeMessageTool: telegramDescribeMessageToolMock,
-      },
-    },
-  },
-} as never);
 
 setBundledChannelRuntime("discord", {
   channel: {
@@ -394,17 +383,16 @@ export const actionContractRegistry: ActionsContractEntry[] = [
     plugin: requireBundledChannelPlugin("telegram"),
     cases: [
       {
-        name: "forwards runtime-backed Telegram actions and capabilities",
-        cfg: {} as OpenClawConfig,
-        expectedActions: ["send", "poll", "react"],
+        name: "exposes configured Telegram actions and capabilities",
+        cfg: {
+          channels: {
+            telegram: {
+              botToken: "123:telegram-test-token",
+            },
+          },
+        } as OpenClawConfig,
+        expectedActions: ["send", "poll", "react", "delete", "edit", "topic-create", "topic-edit"],
         expectedCapabilities: ["interactive", "buttons"],
-        beforeTest: () => {
-          telegramDescribeMessageToolMock.mockReset();
-          telegramDescribeMessageToolMock.mockReturnValue({
-            actions: ["send", "poll", "react"],
-            capabilities: ["interactive", "buttons"],
-          });
-        },
       },
     ],
   },
@@ -940,7 +928,7 @@ const sessionBindingContractEntries: Record<
       adapterAvailable: true,
       bindSupported: true,
       unbindSupported: true,
-      placements: ["current"],
+      placements: ["current", "child"],
     },
     getCapabilities: () => {
       void createChannelConversationBindingManager({

@@ -5,7 +5,6 @@ import {
 } from "../../agents/agent-scope.js";
 import { renderExecTargetLabel, resolveExecTarget } from "../../agents/bash-tools.exec-runtime.js";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
-import { requestLiveSessionModelSwitch } from "../../agents/live-model-switch.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { type SessionEntry, updateSessionStore } from "../../config/sessions.js";
@@ -32,6 +31,7 @@ import {
   withOptions,
 } from "./directive-handling.shared.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel } from "./directives.js";
+import { refreshQueuedFollowupSession } from "./queue.js";
 
 function resolveExecDefaults(params: {
   cfg: OpenClawConfig;
@@ -200,7 +200,7 @@ export async function handleDirectiveOnly(
     };
   }
   if (directives.hasFastDirective && directives.fastMode === undefined) {
-    if (!directives.rawFastMode) {
+    if (!directives.rawFastMode || directives.rawFastMode.toLowerCase() === "status") {
       const sourceSuffix =
         effectiveFastModeSource === "config"
           ? " (config)"
@@ -210,12 +210,12 @@ export async function handleDirectiveOnly(
       return {
         text: withOptions(
           `Current fast mode: ${effectiveFastMode ? "on" : "off"}${sourceSuffix}.`,
-          "on, off",
+          "status, on, off",
         ),
       };
     }
     return {
-      text: `Unrecognized fast mode "${directives.rawFastMode}". Valid levels: on, off.`,
+      text: `Unrecognized fast mode "${directives.rawFastMode}". Valid levels: status, on, off.`,
     };
   }
   if (directives.hasReasoningDirective && !directives.reasoningLevel) {
@@ -442,15 +442,16 @@ export async function handleDirectiveOnly(
         store[sessionKey] = sessionEntry;
       });
     }
-    if (modelSelection && modelSelectionUpdated) {
-      requestLiveSessionModelSwitch({
-        sessionEntry,
-        selection: {
-          provider: modelSelection.provider,
-          model: modelSelection.model,
-          authProfileId: profileOverride,
-          authProfileIdSource: profileOverride ? "user" : undefined,
-        },
+    if (modelSelection && modelSelectionUpdated && sessionKey) {
+      // `/model` should retarget queued/future work without interrupting the
+      // active run. Refresh queued followups so they pick up the persisted
+      // selection once the current turn finishes.
+      refreshQueuedFollowupSession({
+        key: sessionKey,
+        nextProvider: modelSelection.provider,
+        nextModel: modelSelection.model,
+        nextAuthProfileId: profileOverride,
+        nextAuthProfileIdSource: profileOverride ? "user" : undefined,
       });
     }
   }

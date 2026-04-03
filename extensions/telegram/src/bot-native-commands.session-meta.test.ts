@@ -111,30 +111,25 @@ vi.mock("openclaw/plugin-sdk/command-auth", async (importOriginal) => {
     listSkillCommandsForAgents: vi.fn(() => []),
   };
 });
-vi.mock("openclaw/plugin-sdk/reply-runtime", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/reply-runtime")>();
+vi.mock("openclaw/plugin-sdk/reply-dispatch-runtime", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("openclaw/plugin-sdk/reply-dispatch-runtime")>();
   return {
     ...actual,
     finalizeInboundContext: vi.fn((ctx: unknown) => ctx),
     dispatchReplyWithBufferedBlockDispatcher: replyMocks.dispatchReplyWithBufferedBlockDispatcher,
   };
 });
-vi.mock("../../../src/config/sessions.js", () => ({
-  recordSessionMetaFromInbound: sessionMocks.recordSessionMetaFromInbound,
-  resolveStorePath: sessionMocks.resolveStorePath,
-}));
+vi.mock("../../../src/config/sessions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/config/sessions.js")>();
+  return {
+    ...actual,
+    recordSessionMetaFromInbound: sessionMocks.recordSessionMetaFromInbound,
+    resolveStorePath: sessionMocks.resolveStorePath,
+  };
+});
 vi.mock("../../../src/pairing/pairing-store.js", () => ({
   readChannelAllowFromStore: vi.fn(async () => []),
-}));
-vi.mock("openclaw/plugin-sdk/conversation-runtime", () => ({
-  getSessionBindingService: () => ({
-    bind: vi.fn(),
-    getCapabilities: vi.fn(),
-    listBySession: vi.fn(),
-    resolveByConversation: (ref: unknown) => sessionBindingMocks.resolveByConversation(ref),
-    touch: (bindingId: string, at?: number) => sessionBindingMocks.touch(bindingId, at),
-    unbind: vi.fn(),
-  }),
 }));
 vi.mock("../../../src/plugins/commands.js", () => ({
   getPluginCommandSpecs: vi.fn(() => []),
@@ -212,6 +207,7 @@ function registerAndResolveCommandHandlerBase(params: {
       modelNames: new Map<string, string>(),
     })),
     listSkillCommandsForAgents: vi.fn(() => []),
+    syncTelegramMenuCommands: vi.fn(),
     wasSentByBot: vi.fn(() => false),
   };
   registerTelegramNativeCommands({
@@ -391,7 +387,6 @@ function expectUnauthorizedNewCommandBlocked(sendMessage: ReturnType<typeof vi.f
 
 describe("registerTelegramNativeCommands — session metadata", () => {
   beforeAll(async () => {
-    vi.resetModules();
     ({ registerTelegramNativeCommands } = await import("./bot-native-commands.js"));
   });
 
